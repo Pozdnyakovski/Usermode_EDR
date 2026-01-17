@@ -1,7 +1,7 @@
 
 Hi.
 I wrote this mini UserMode EDR, or PoC, for Windows when I was 15.
-EDR.dll — the main part where all hooks and detections take place.
+EDR.dll — the main part where all hooks and detections take place. There is no correlation engine.
 
 Demonstation:
 https://github.com/user-attachments/assets/611f6402-2361-43f3-84e9-0c571486e454
