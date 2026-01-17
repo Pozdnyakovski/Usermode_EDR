@@ -1,6 +1,6 @@
 
 Hi.
-I wrote this mini UserMode EDR, or PoC, for Windows when I was 15.
+I'm 15 years old, I'm into EDR development, and this is my mini PoC. Or, if you want to call it that, a mini-EDR running at the user-mod level.
 EDR.dll - the main part where all hooks and detections take place. There is no correlation engine.
 
 Demonstation:
