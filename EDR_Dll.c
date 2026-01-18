@@ -1,4 +1,7 @@
-/*author: Pozdnyakovski*/
+/*
+Главный разработчик: Александр Измайлов.
+*/
+
 
 #include <windows.h>
 #include <stdio.h>
@@ -13,6 +16,32 @@ typedef struct {
     char type[32];          
     char description[256];  
 } EDR_EVENT;
+
+typedef USHORT(NTAPI* PRtlCaptureStackBackTrace)(
+    ULONG  FramesToSkip,
+    ULONG  FramesToCapture,
+    PVOID* BackTrace,
+    PULONG BackTraceHash
+    );
+PRtlCaptureStackBackTrace OriginalRtlCaptureStackBackTrace = NULL;
+
+typedef NTSTATUS(NTAPI* PNtProtectVirtualMemory)(
+    _In_    HANDLE  ProcessHandle,
+    _Inout_ PVOID* BaseAddress,
+    _Inout_ PSIZE_T RegionSize,
+    _In_    ULONG   NewProtection,
+    _Out_   PULONG  OldProtection
+    );
+PNtProtectVirtualMemory OriginalNtProtectVirtualMemory = NULL;
+
+typedef NTSTATUS(NTAPI* PNtWriteVirtualMemory)(
+    IN HANDLE ProcessHandle,
+    IN PVOID BaseAddress,
+    IN PVOID  Buffer,
+    IN ULONG  NumberOfBytesToWrite,
+    OUT PULONG NumberOfBytesWritten OPTIONAL
+    );
+PNtWriteVirtualMemory OriginalNtWriteVirtualMemory = NULL;
 
 typedef NTSTATUS(NTAPI* PNtAllocateVirtualMemory)(
     HANDLE ProcessHandle,
@@ -38,9 +67,11 @@ typedef NTSTATUS(NTAPI* PNtCreateThreadEx)(
     IN PVOID AttributeList OPTIONAL
     );
 PNtCreateThreadEx OriginalNtCreateThreadEx = NULL;
-
+PVOID addrNtProtect = NULL;
 PVOID addrNtAllocate = NULL;
 PVOID addrNtCreateThread = NULL;
+__declspec(thread) PHANDLE g_pThreadHandleAddr = NULL;
+
 LONG WINAPI HardwareBreakpointHandler(PEXCEPTION_POINTERS ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
@@ -59,20 +90,90 @@ LONG WINAPI HardwareBreakpointHandler(PEXCEPTION_POINTERS ExceptionInfo)
         }
         if (faultAddr == addrNtCreateThread)
         {
-            HANDLE hTargetProc = (HANDLE)ctx->R9; 
+            HANDLE hTargetProc = (HANDLE)ctx->R9;
             PVOID startRountine = *(PVOID*)(ctx->Rsp + 40);
 
             if (hTargetProc != (HANDLE)-1 && GetProcessId(hTargetProc) != GetCurrentProcessId())
             {
-                MessageBoxA(0, "detect use NtCreateThreadEx", "EDR", MB_ICONERROR);
+                MessageBoxA(0, "detect use ntcreatethreadex", "EDR", MB_ICONERROR);
                 TerminateProcess(GetCurrentProcess(), 0);
+            }
+            if (hTargetProc == (HANDLE)-1 || GetProcessId(hTargetProc) == GetCurrentProcessId())
+            {
+                g_pThreadHandleAddr = (PHANDLE)ctx->Rcx;
+                DWORD64 retAddr = *(DWORD64*)(ctx->Rsp);
+                ctx->Dr2 = retAddr;
+                ctx->Dr7 |= (1ULL << 4);
             }
         }
         ctx->EFlags |= (1 << 16);
         return EXCEPTION_CONTINUE_EXECUTION;
     }
+    if (faultAddr == addrNtAllocate)
+    {
+        ULONG Protect = *(ULONG*)(ctx->Rsp + 48);
+        
+        if (Protect == PAGE_EXECUTE_READWRITE)
+        {
+            TerminateProcess(GetCurrentProcess(), 0);
+        }
+        ctx->EFlags |= (1 << 16);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (faultAddr == addrNtProtect)
+    {
+        BOOL bs = FALSE;
+        ULONG NewProtection = (ULONG)(ctx->R9);
+
+        if (NewProtection == PAGE_EXECUTE_READ || NewProtection == PAGE_EXECUTE_READWRITE)
+        {
+            void* returnsAddress = NULL;
+            if (CaptureStackBackTrace(1, 1, &returnsAddress, NULL) > 0)
+            {
+                HMODULE hMods = NULL;
+                if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    (LPCSTR)returnsAddress, &hMods))
+                {
+                    TerminateProcess(GetCurrentProcess(), 0);
+                }
+            }
+        }
+        ctx->EFlags |= (1 << 16);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    
+    if (faultAddr == (PVOID)ctx->Dr2)
+    {
+        if (g_pThreadHandleAddr != NULL)
+        {
+            HANDLE hNewThread = *g_pThreadHandleAddr;
+
+            if (hNewThread != NULL)
+            {
+                CONTEXT ThreadCtxNew = { 0 };
+                ThreadCtxNew.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+
+                if (GetThreadContext(hNewThread, &ThreadCtxNew))
+                {
+                    ThreadCtxNew.Dr0 = (DWORD64)addrNtCreateThread;
+                    ThreadCtxNew.Dr1 = (DWORD64)addrNtAllocate;
+                    ThreadCtxNew.Dr3 = (DWORD64)addrNtProtect;
+                    ThreadCtxNew.Dr7 = (1ULL << 0) | (1ULL << 2);
+                    SetThreadContext(hNewThread, &ThreadCtxNew);
+                }
+            }
+            g_pThreadHandleAddr = NULL;
+        }
+        ctx->Dr2 = 0;
+        ctx->Dr7 &= ~(1ULL << 4);
+    
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     return EXCEPTION_CONTINUE_SEARCH;
 }
+
 typedef PVOID(WINAPI* PAddVectoredExceptionHandler)(
     ULONG First,
     PVECTORED_EXCEPTION_HANDLER Handler
@@ -100,6 +201,7 @@ PShellExecuteA OriginalPShellExecuteA = NULL;
 typedef LSTATUS(WINAPI* PRegSetValueExA)(HKEY, LPCSTR, DWORD, DWORD, const BYTE*, DWORD);
 PRegSetValueExA OriginalRegSetValueExA = NULL;
 
+
 void SetHardwareBreakpoint(PVOID address, int index)
 {
     CONTEXT ctx = { 0 };
@@ -108,14 +210,15 @@ void SetHardwareBreakpoint(PVOID address, int index)
     if (GetThreadContext(hThread, &ctx)) {
         if (index == 0) ctx.Dr0 = (DWORD64)address;
         else if (index == 1) ctx.Dr1 = (DWORD64)address;
-        else if (index == 2) ctx.Dr2 = (DWORD64)address;
         else if (index == 3) ctx.Dr3 = (DWORD64)address;
 
         ctx.Dr7 |= (1ULL << (index * 2));
+        ctx.Dr7 &= ~(0xFUI64 << (16 + (index * 4)));
 
         if (!SetThreadContext(hThread, &ctx));
     }
 }
+
 
 void anti()
 {
@@ -128,8 +231,6 @@ void anti()
 }
 
 
-// IPC tonel
-
 //void SendAlert(const char* type, const char* msg)
 //{
 //    HANDLE hPipe;
@@ -140,7 +241,7 @@ void anti()
 //    strcpy_s(event.type, sizeof(event.type), type);
 //    strcpy_s(event.description, sizeof(event.description), msg);
 //
-//    hPipe = CreateFileA("\\\\.\\pipe\\dutyfree", GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+//    hPipe = CreateFileA("\\\\.\\pipe\\ipctest", GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
 //
 //    if (hPipe != INVALID_HANDLE_VALUE)
 //    {
@@ -149,21 +250,73 @@ void anti()
 //    }
 //}
 
+ULONG HookRtlCaptureStackBackTrace(ULONG  FramesToSkip, ULONG  FramesToCapture, PVOID* BackTrace, PULONG BackTraceHash)
+{
+    if (FramesToSkip >= 5 && FramesToSkip <= 15)
+    {
+        MessageBoxA(0, "Попытка скрытия шеллкода", "EDR", MB_OK);
+        return 0xC0000022;
+    }
+    return OriginalRtlCaptureStackBackTrace(FramesToSkip, FramesToCapture, BackTrace, BackTraceHash);
+}
+
+NTSTATUS HookNtProtectVirtualMemory(_In_ HANDLE  ProcessHandle, _Inout_ PVOID* BaseAddress, _Inout_ PSIZE_T RegionSize, _In_ ULONG NewProtection, _Out_ PULONG  OldProtection)
+{
+    if (ProcessHandle != (HANDLE)-1 && GetProcessId(ProcessHandle) != GetCurrentProcessId())
+    {
+        TerminateProcess(GetCurrentProcess(), 0);
+        return 0xC0000022; 
+    }
+    if (NewProtection == PAGE_EXECUTE_READ || NewProtection == PAGE_EXECUTE_READWRITE)
+    {
+        void* returnAddress = NULL;
+        if (CaptureStackBackTrace(1, 1, &returnAddress, NULL) > 0)
+        {
+            HMODULE hMod = NULL;
+            if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (LPCSTR)returnAddress, &hMod))
+            {
+                TerminateProcess(GetCurrentProcess(), 0);
+                return 0xC0000022;
+            }
+        }
+    }
+    return OriginalNtProtectVirtualMemory(ProcessHandle, BaseAddress, RegionSize, NewProtection, OldProtection);
+}
+
+
+NTSTATUS HookNtWriteVirtualMemory(IN HANDLE ProcessHandle, IN PVOID BaseAddress, IN PVOID Buffer, IN ULONG NumberOfBytesToWrite, OUT PULONG NumberOfBytesWritten OPTIONAL)
+{
+    if (ProcessHandle != (HANDLE)-1)
+    {
+        DWORD targetPid = GetProcessId(ProcessHandle);
+        if (targetPid != 0 && targetPid != GetCurrentProcessId())
+        {
+            return 0xC0000022;
+        }
+    }
+    return OriginalNtWriteVirtualMemory(ProcessHandle, BaseAddress, Buffer, NumberOfBytesToWrite, NumberOfBytesWritten);
+}
+
 
 NTSTATUS HookPNtAllocateVirtualMemory(HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, PSIZE_T RegionSIZE, ULONG AllocationType, ULONG Protect)
 {
     if (ProcessHandle != (HANDLE)-1 && ProcessHandle != GetCurrentProcess())
     {
-        MessageBoxA(0, "Hooked NtAllocateVirtualMemory.", "EDR", MB_ICONERROR);
+        MessageBoxA(0, "Hooked NtAllocateVirtualMemory", "EDR", MB_ICONERROR);
         TerminateProcess(GetCurrentProcess(), 0);
-        return ERROR_ACCESS_DENIED;
+        return 0xC0000022;;
     }
     if (Protect == PAGE_EXECUTE_READWRITE)
     {
-        MessageBoxA(0, "Detect used R/W//X prefix", "EDR", MB_ICONERROR);
+        MessageBoxA(0, "Также была замечена использования R/W/X префиксов, мы заблокировали выполнение!", "EDR", MB_ICONERROR);
+        TerminateProcess(GetCurrentProcess(), 0);
+        return 0xC0000022;;
     }
     return OriginalNtAllocateVirtualMemory(ProcessHandle, BaseAddress, ZeroBits, RegionSIZE, AllocationType, Protect);
 }
+
 
 LSTATUS WINAPI HookRegSetValueExA(HKEY hKey, LPCSTR lpValueName, DWORD Reserved, DWORD dwType, const BYTE* lpData, DWORD cbData) {
     if (hKey == HKEY_CURRENT_USER)
@@ -172,6 +325,7 @@ LSTATUS WINAPI HookRegSetValueExA(HKEY hKey, LPCSTR lpValueName, DWORD Reserved,
     }
     return OriginalRegSetValueExA(hKey, lpValueName, Reserved, dwType, lpData, cbData);
 }
+
 
 HINSTANCE WINAPI HookShellExecuteA(HWND hwnd, LPCSTR lpOperation, LPCSTR lpFile, LPCSTR lpParameters, LPCSTR lpDirectory, INT nShowCmd) {
     if (lpFile != NULL)
@@ -182,8 +336,9 @@ HINSTANCE WINAPI HookShellExecuteA(HWND hwnd, LPCSTR lpOperation, LPCSTR lpFile,
             return (HINSTANCE)ERROR_ACCESS_DENIED;
         }
     }
-        return OriginalPShellExecuteA(hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShowCmd);
+    return OriginalPShellExecuteA(hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShowCmd);
 }
+
 
 LSTATUS WINAPI HookRegCreateKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD Reserved, LPSTR lpClass, DWORD dwOptions, REGSAM samDesired, const LPSECURITY_ATTRIBUTES lpSecurityAttributes, PHKEY phkResult, LPDWORD lpdwDisposition)
 {
@@ -191,13 +346,15 @@ LSTATUS WINAPI HookRegCreateKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD Reserved, L
     {
         if (_stricmp(lpSubKey, "Software\\Classes\\ms-settings\\shell\\open\\command") == 0)
         {
-            MessageBoxA(0, "attempt to reconfigure ms-command!", "EDR", 0);
+            MessageBoxA(0, "Попытка перенастройки ms-command!", "EDR", 0);
             TerminateProcess(GetCurrentProcess(), 0);
             return ERROR_ACCESS_DENIED;
         }
     }
         return OriginalRegCreateKeyExA(hKey, lpSubKey, Reserved, lpClass, dwOptions, samDesired, lpSecurityAttributes, phkResult, lpdwDisposition);
 }
+
+
 BOOL WINAPI HookGetThreadContext(HANDLE hThread, LPCONTEXT lpContext)
 {
     BOOL result = OriginalGetThreadContext(hThread, lpContext);
@@ -216,6 +373,7 @@ BOOL WINAPI HookGetThreadContext(HANDLE hThread, LPCONTEXT lpContext)
     return result;
 }
 
+
 BOOL WINAPI HookSetThreadContext(HANDLE hThread, const CONTEXT *lpContext)
 {
     if (lpContext == NULL)
@@ -232,6 +390,8 @@ BOOL WINAPI HookSetThreadContext(HANDLE hThread, const CONTEXT *lpContext)
     }
     return OriginalSetThreadContext(hThread, lpContext);
 }
+
+
 PVOID WINAPI HookAddVectoredExceptionHandler(ULONG First, PVECTORED_EXCEPTION_HANDLER Handler)
 {
     if (First != 0)
@@ -241,14 +401,31 @@ PVOID WINAPI HookAddVectoredExceptionHandler(ULONG First, PVECTORED_EXCEPTION_HA
     return OriginalAddVectoredExeceptionHandler(First, Handler);
 }
 
+
 void InstallIATHook() {
     OriginalNtAllocateVirtualMemory = (PNtAllocateVirtualMemory)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtAllocateVirtualMemory");
+
+    AddVectoredExceptionHandler(1, HardwareBreakpointHandler);
+    
     addrNtCreateThread = GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtCreateThreadEx");
-    if (addrNtCreateThread)
+    addrNtAllocate = GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtAllocateVirtualMemory");
+    addrNtProtect = GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtProtectVirtualMemory");
+    
+    if (addrNtCreateThread) 
     {
-        AddVectoredExceptionHandler(1, HardwareBreakpointHandler);
-        SetHardwareBreakpoint(addrNtCreateThread, 1);
+        SetHardwareBreakpoint(addrNtCreateThread, 0);
     }
+    
+    if(addrNtAllocate)
+    {
+        SetHardwareBreakpoint(addrNtAllocate, 1);
+    }
+
+    if (addrNtProtect)
+    {
+        SetHardwareBreakpoint(addrNtProtect, 3);
+    }
+
     HMODULE hBase = GetModuleHandle(NULL);
     PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hBase;
     PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((BYTE*)hBase + dosHeader->e_lfanew);
@@ -269,6 +446,16 @@ void InstallIATHook() {
     OriginalSetThreadContext = (PSetThreadContext)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadContext");
     OriginalGetThreadContext = (PGetThreadContext)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadContext");
     OriginalAddVectoredExeceptionHandler = (PAddVectoredExceptionHandler)GetProcAddress(GetModuleHandleA("kernel32.dll"), "AddVectoredExceptionHandler");
+
+    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+    OriginalNtProtectVirtualMemory = (PNtProtectVirtualMemory)GetProcAddress(hNtdll, "NtProtectVirtualMemory");
+    OriginalNtWriteVirtualMemory = (PNtWriteVirtualMemory)GetProcAddress(hNtdll, "NtWriteVirtualMemory");
+    OriginalNtAllocateVirtualMemory = (PNtAllocateVirtualMemory)GetProcAddress(hNtdll, "NtAllocateVirtualMemory");
+    OriginalNtCreateThreadEx = (PNtCreateThreadEx)GetProcAddress(hNtdll, "NtCreateThreadEx");
+    OriginalRtlCaptureStackBackTrace = (PRtlCaptureStackBackTrace)GetProcAddress(hNtdll, "RtlCaptureStackBackTrace");
+    addrNtAllocate = (PVOID)GetProcAddress(hNtdll, "NtAllocateVirtualMemory");
+    addrNtCreateThread = (PVOID)GetProcAddress(hNtdll, "NtCreateThreadEx");
+
 
     while (importDesc->Name) {
         char* dllName = (char*)((BYTE*)hBase + importDesc->Name);
@@ -302,17 +489,6 @@ void InstallIATHook() {
                 thunk++;
             }
         }
-        else if (_stricmp(dllName, "ntdll.dll") == 0) {
-            while (thunk->u1.Function) {
-                if ((PVOID)thunk->u1.Function == (PVOID)OriginalNtAllocateVirtualMemory) {
-                    DWORD oldProtect;
-                    VirtualProtect(&thunk->u1.Function, sizeof(PVOID), PAGE_READWRITE, &oldProtect);
-                    thunk->u1.Function = (DWORD_PTR)HookPNtAllocateVirtualMemory;
-                    VirtualProtect(&thunk->u1.Function, sizeof(PVOID), oldProtect, &oldProtect);
-                }
-                thunk++;
-            }
-        }
         else if (_stricmp(dllName, "kernel32.dll") == 0) {
             while (thunk->u1.Function) {
                 if ((PVOID)thunk->u1.Function == (PVOID)OriginalSetThreadContext) {
@@ -337,6 +513,27 @@ void InstallIATHook() {
                 thunk++;
             }
         }
+        else if (_stricmp(dllName, "ntdll.dll") == 0) {
+            while (thunk->u1.Function) {
+                PVOID hookAddr = NULL;
+                if ((PVOID)thunk->u1.Function == (PVOID)OriginalNtAllocateVirtualMemory)
+                    hookAddr = (PVOID)HookPNtAllocateVirtualMemory;
+                else if ((PVOID)thunk->u1.Function == (PVOID)OriginalNtWriteVirtualMemory)
+                    hookAddr = (PVOID)HookNtWriteVirtualMemory;
+                else if ((PVOID)thunk->u1.Function == (PVOID)OriginalNtProtectVirtualMemory)
+                    hookAddr = (PVOID)HookNtProtectVirtualMemory;
+                else if ((PVOID)thunk->u1.Function == (PVOID)OriginalRtlCaptureStackBackTrace)
+                    hookAddr = (PVOID)HookRtlCaptureStackBackTrace;
+
+                if (hookAddr) {
+                    DWORD oldProtect;
+                    VirtualProtect(&thunk->u1.Function, sizeof(PVOID), PAGE_READWRITE, &oldProtect);
+                    thunk->u1.Function = (DWORD_PTR)hookAddr;
+                    VirtualProtect(&thunk->u1.Function, sizeof(PVOID), oldProtect, &oldProtect);
+                }
+                thunk++;
+            }
+        }
         importDesc++;
     }
 }
@@ -349,3 +546,4 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     }
     return TRUE;
 }
+
