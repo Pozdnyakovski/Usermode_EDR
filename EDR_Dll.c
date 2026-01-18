@@ -2,7 +2,6 @@
 Главный разработчик: Александр Измайлов.
 */
 
-
 #include <windows.h>
 #include <stdio.h>
 #include <locale.h>
