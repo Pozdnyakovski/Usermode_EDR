@@ -1,9 +1,5 @@
 
-Hi.
-I'm 15 years old, I'm into EDR development, and this is my mini PoC. Or, if you want to call it that, a mini-EDR running at the user-mod level.
-EDR.dll - the main part where all hooks and detections take place. There is no correlation engine.
-
-Demonstation:
+Demonstationn:
 https://github.com/user-attachments/assets/611f6402-2361-43f3-84e9-0c571486e454
 
 
