@@ -10,11 +10,11 @@
 //typedef int(WINAPI* PMessageBoxA)(HWND, LPCSTR, LPCSTR, UINT);
 //PMessageBoxA OriginalMessageBoxA = NULL;
 
-typedef struct {
+/*typedef struct {
     int processId;          
     char type[32];          
     char description[256];  
-} EDR_EVENT;
+} EDR_EVENT;*/ // IPC-туннель.
 
 typedef USHORT(NTAPI* PRtlCaptureStackBackTrace)(
     ULONG  FramesToSkip,
