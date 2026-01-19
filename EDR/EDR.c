@@ -1,5 +1,6 @@
 /*
 Главный разработчик: Александр Измайлов.
+Начата разработка корреляционного движка.
 */
 #include <windows.h>
 #include <stdio.h>
@@ -7,16 +8,32 @@
 #include <winternl.h>
 
 typedef struct {
+    int score;
+} Corecial;
+
+static Corecial global_x = { 0 };
+
+void set_score(Corecial* x, int value)
+{
+    x->score = value;
+
+    if (x->score >= 100)
+    {
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
+}
+
+typedef struct {
     int processId;          
     char type[32];          
     char description[256];  
 } EDR_EVENT;
+
 typedef NTSTATUS(NTAPI* PLdrUnloadDll)(
     _In_ HMODULE ModuleHandle
     );
-
 PLdrUnloadDll OriginalLdrUnLoadDll = NULL;
-
+  
 typedef NTSTATUS(NTAPI* PZwMapViewOfSection)(
     _In_        HANDLE          SectionHandle,
     _In_        HANDLE          ProcessHandle,
@@ -284,7 +301,7 @@ NTSTATUS HookZwMapViewOfSection(HANDLE SectionHandle, HANDLE ProcessHandle, PVOI
     {
         if (Win32Protect == PAGE_EXECUTE_READWRITE)
         {
-            return 0xC0000022;
+            set_score(&global_x, global_x.score + 50);
         }
     }
 
@@ -305,7 +322,7 @@ NTSTATUS HookLdrUnloadDll(HMODULE hModule)
 
     if (hModule == hEDR)
     {
-        return 0xC0000022;
+        set_score(&global_x, global_x.score + 50);
     }
     return OriginalLdrUnLoadDll(hModule);
 }
@@ -390,8 +407,7 @@ HINSTANCE WINAPI HookShellExecuteA(HWND hwnd, LPCSTR lpOperation, LPCSTR lpFile,
     {
         if (_stricmp(lpFile, "fodhelper.exe") == 0)
         {
-            MessageBoxA(0, "Detect fodhelper(UAC-Bypass)", "EDR", MB_ICONERROR);
-            return (HINSTANCE)ERROR_ACCESS_DENIED;
+            set_score(&global_x, global_x.score + 100);
         }
     }
     return OriginalPShellExecuteA(hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShowCmd);
@@ -603,13 +619,19 @@ void InstallIATHook() {
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
-    setlocale(LC_ALL, "RU");
     if (reason == DLL_PROCESS_ATTACH) {
+        set_score(&global_x, 10);
         anti();
         InstallIATHook();
     }
     return TRUE;
 }
+
+
+
+
+
+
 
 
 
