@@ -511,6 +511,7 @@ void InstallIATHook() {
     OriginalNtAllocateVirtualMemory = (PNtAllocateVirtualMemory)GetProcAddress(hNtdll, "NtAllocateVirtualMemory");
     OriginalNtCreateThreadEx = (PNtCreateThreadEx)GetProcAddress(hNtdll, "NtCreateThreadEx");
     OriginalRtlCaptureStackBackTrace = (PRtlCaptureStackBackTrace)GetProcAddress(hNtdll, "RtlCaptureStackBackTrace");
+    OriginalZwMapViewOfSection = (PZwMapViewOfSection)GetProcAddress(hNtdll, "ZwMapViewOfSection");
     OriginalLdrUnLoadDll = (PLdrUnloadDll)GetProcAddress(hNtdll, "LdrUnloadDll");
     addrNtAllocate = (PVOID)GetProcAddress(hNtdll, "NtAllocateVirtualMemory");
     addrNtCreateThread = (PVOID)GetProcAddress(hNtdll, "NtCreateThreadEx");
@@ -609,4 +610,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     }
     return TRUE;
 }
+
+
+
+
 
