@@ -6,12 +6,6 @@
 #include <locale.h>
 #include <winternl.h>
 
-//typedef int(WINAPI* PMessageBoxA)(HWND, LPCSTR, LPCSTR, UINT);
-//PMessageBoxA OriginalMessageBoxA = NULL;
-
-
-
-
 typedef struct {
     int processId;          
     char type[32];          
@@ -23,6 +17,19 @@ typedef NTSTATUS(NTAPI* PLdrUnloadDll)(
 
 PLdrUnloadDll OriginalLdrUnLoadDll = NULL;
 
+typedef NTSTATUS(NTAPI* PZwMapViewOfSection)(
+    _In_        HANDLE          SectionHandle,
+    _In_        HANDLE          ProcessHandle,
+    _Inout_     PVOID* BaseAddress,
+    _In_        ULONG_PTR       ZeroBits,
+    _In_        SIZE_T          CommitSize,
+    _Inout_opt_ PLARGE_INTEGER  SectionOffset,
+    _Inout_     PSIZE_T         ViewSize,
+    _In_        ULONG InheritDisposition,
+    _In_        ULONG           AllocationType,
+    _In_        ULONG           Win32Protect
+    );
+PZwMapViewOfSection OriginalZwMapViewOfSection = NULL;
 
 typedef USHORT(NTAPI* PRtlCaptureStackBackTrace)(
     ULONG  FramesToSkip,
@@ -73,6 +80,21 @@ typedef NTSTATUS(NTAPI* PNtCreateThreadEx)(
     IN SIZE_T MaximumStackSize,
     IN PVOID AttributeList OPTIONAL
     );
+
+typedef BOOL(WINAPI* PCreateProcessA)(
+         LPCSTR                lpApplicationName,
+         LPSTR                 lpCommandLine,
+         LPSECURITY_ATTRIBUTES lpProcessAttributes,
+         LPSECURITY_ATTRIBUTES lpThreadAttributes,
+         BOOL                  bInheritHandles,
+         DWORD                 dwCreationFlags,
+         LPVOID                lpEnvironment,
+         LPCSTR                lpCurrentDirectory,
+         LPSTARTUPINFOA        lpStartupInfo,
+         LPPROCESS_INFORMATION lpProcessInformation
+);
+PCreateProcessA OriginalCreateProcessA = NULL;
+
 PNtCreateThreadEx OriginalNtCreateThreadEx = NULL;
 PVOID addrNtProtect = NULL;
 PVOID addrNtAllocate = NULL;
@@ -256,6 +278,18 @@ void anti()
 //        CloseHandle(hPipe);
 //    }
 //}
+NTSTATUS HookZwMapViewOfSection(HANDLE SectionHandle, HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, SIZE_T CommitSize, PLARGE_INTEGER SectionOffset, PSIZE_T ViewSize, ULONG InheritDisposition, ULONG AllocationType, ULONG Win32Protect)
+{
+    if (ProcessHandle != (HANDLE)-1 && ProcessHandle != GetCurrentProcess())
+    {
+        if (Win32Protect == PAGE_EXECUTE_READWRITE)
+        {
+            return 0xC0000022;
+        }
+    }
+
+    return OriginalZwMapViewOfSection(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect);
+}
 
 NTSTATUS HookLdrUnloadDll(HMODULE hModule)
 {
@@ -551,6 +585,8 @@ void InstallIATHook() {
                     hookAddr = (PVOID)HookRtlCaptureStackBackTrace;
                 else if ((PVOID)thunk->u1.Function == (PVOID)OriginalLdrUnLoadDll)
                     hookAddr = (PVOID)HookLdrUnloadDll;
+                else if ((PVOID)thunk->u1.Function == (PVOID)OriginalZwMapViewOfSection)
+                    hookAddr = (PVOID)HookZwMapViewOfSection;
 
                 if (hookAddr) {
                     DWORD oldProtect;
@@ -573,5 +609,4 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     }
     return TRUE;
 }
-
 
