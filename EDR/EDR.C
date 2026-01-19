@@ -1,7 +1,6 @@
 /*
 Главный разработчик: Александр Измайлов.
 */
-
 #include <windows.h>
 #include <stdio.h>
 #include <locale.h>
@@ -10,11 +9,20 @@
 //typedef int(WINAPI* PMessageBoxA)(HWND, LPCSTR, LPCSTR, UINT);
 //PMessageBoxA OriginalMessageBoxA = NULL;
 
-/*typedef struct {
+
+
+
+typedef struct {
     int processId;          
     char type[32];          
     char description[256];  
-} EDR_EVENT;*/ // IPC-туннель.
+} EDR_EVENT;
+typedef NTSTATUS(NTAPI* PLdrUnloadDll)(
+    _In_ HMODULE ModuleHandle
+    );
+
+PLdrUnloadDll OriginalLdrUnLoadDll = NULL;
+
 
 typedef USHORT(NTAPI* PRtlCaptureStackBackTrace)(
     ULONG  FramesToSkip,
@@ -68,6 +76,7 @@ typedef NTSTATUS(NTAPI* PNtCreateThreadEx)(
 PNtCreateThreadEx OriginalNtCreateThreadEx = NULL;
 PVOID addrNtProtect = NULL;
 PVOID addrNtAllocate = NULL;
+HMODULE g_MyEDRModule = NULL;
 PVOID addrNtCreateThread = NULL;
 __declspec(thread) PHANDLE g_pThreadHandleAddr = NULL;
 
@@ -94,8 +103,7 @@ LONG WINAPI HardwareBreakpointHandler(PEXCEPTION_POINTERS ExceptionInfo)
 
             if (hTargetProc != (HANDLE)-1 && GetProcessId(hTargetProc) != GetCurrentProcessId())
             {
-                MessageBoxA(0, "detect use ntcreatethreadex", "EDR", MB_ICONERROR);
-                TerminateProcess(GetCurrentProcess(), 0);
+                return 0xC0000022;
             }
             if (hTargetProc == (HANDLE)-1 || GetProcessId(hTargetProc) == GetCurrentProcessId())
             {
@@ -114,7 +122,7 @@ LONG WINAPI HardwareBreakpointHandler(PEXCEPTION_POINTERS ExceptionInfo)
         
         if (Protect == PAGE_EXECUTE_READWRITE)
         {
-            TerminateProcess(GetCurrentProcess(), 0);
+            return 0xC0000022;
         }
         ctx->EFlags |= (1 << 16);
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -249,11 +257,30 @@ void anti()
 //    }
 //}
 
+NTSTATUS HookLdrUnloadDll(HMODULE hModule)
+{
+    static HMODULE hEDR = NULL;
+    if (!hEDR)
+    {
+        GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_PIN,
+            (LPCSTR)HookLdrUnloadDll,
+            &hEDR);
+    }
+
+    if (hModule == hEDR)
+    {
+        return 0xC0000022;
+    }
+    return OriginalLdrUnLoadDll(hModule);
+}
+
 ULONG HookRtlCaptureStackBackTrace(ULONG  FramesToSkip, ULONG  FramesToCapture, PVOID* BackTrace, PULONG BackTraceHash)
 {
     if (FramesToSkip >= 5 && FramesToSkip <= 15)
     {
-        MessageBoxA(0, "Попытка скрытия шеллкода", "EDR", MB_OK);
+        TerminateProcess(GetCurrentProcess(), 0);
         return 0xC0000022;
     }
     return OriginalRtlCaptureStackBackTrace(FramesToSkip, FramesToCapture, BackTrace, BackTraceHash);
@@ -303,13 +330,11 @@ NTSTATUS HookPNtAllocateVirtualMemory(HANDLE ProcessHandle, PVOID* BaseAddress, 
 {
     if (ProcessHandle != (HANDLE)-1 && ProcessHandle != GetCurrentProcess())
     {
-        MessageBoxA(0, "Hooked NtAllocateVirtualMemory", "EDR", MB_ICONERROR);
         TerminateProcess(GetCurrentProcess(), 0);
         return 0xC0000022;;
     }
     if (Protect == PAGE_EXECUTE_READWRITE)
     {
-        MessageBoxA(0, "Также была замечена использования R/W/X префиксов, мы заблокировали выполнение!", "EDR", MB_ICONERROR);
         TerminateProcess(GetCurrentProcess(), 0);
         return 0xC0000022;;
     }
@@ -452,6 +477,7 @@ void InstallIATHook() {
     OriginalNtAllocateVirtualMemory = (PNtAllocateVirtualMemory)GetProcAddress(hNtdll, "NtAllocateVirtualMemory");
     OriginalNtCreateThreadEx = (PNtCreateThreadEx)GetProcAddress(hNtdll, "NtCreateThreadEx");
     OriginalRtlCaptureStackBackTrace = (PRtlCaptureStackBackTrace)GetProcAddress(hNtdll, "RtlCaptureStackBackTrace");
+    OriginalLdrUnLoadDll = (PLdrUnloadDll)GetProcAddress(hNtdll, "LdrUnloadDll");
     addrNtAllocate = (PVOID)GetProcAddress(hNtdll, "NtAllocateVirtualMemory");
     addrNtCreateThread = (PVOID)GetProcAddress(hNtdll, "NtCreateThreadEx");
 
@@ -523,6 +549,8 @@ void InstallIATHook() {
                     hookAddr = (PVOID)HookNtProtectVirtualMemory;
                 else if ((PVOID)thunk->u1.Function == (PVOID)OriginalRtlCaptureStackBackTrace)
                     hookAddr = (PVOID)HookRtlCaptureStackBackTrace;
+                else if ((PVOID)thunk->u1.Function == (PVOID)OriginalLdrUnLoadDll)
+                    hookAddr = (PVOID)HookLdrUnloadDll;
 
                 if (hookAddr) {
                     DWORD oldProtect;
@@ -545,4 +573,5 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     }
     return TRUE;
 }
+
 
