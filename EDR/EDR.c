@@ -1,11 +1,11 @@
 /*
-for xss
 Начата разработка корреляционного движка.
 */
 #include <windows.h>
 #include <stdio.h>
 #include <locale.h>
 #include <winternl.h>
+#include <string.h>
 
 typedef struct {
     int score;
@@ -17,7 +17,7 @@ void set_score(Corecial* x, int value)
 {
     x->score = value;
 
-    if (x->score >= 100)
+    if (x->score >= 200)
     {
         TerminateProcess(GetCurrentProcess(), 0);
     }
@@ -132,7 +132,7 @@ LONG WINAPI HardwareBreakpointHandler(PEXCEPTION_POINTERS ExceptionInfo)
             HMODULE hMod = NULL;
             if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)returnAddress, &hMod))
             {
-                TerminateProcess(GetCurrentProcess(), 0xDEAD1);
+                set_score(&global_x, global_x.score + 20);
             }
         }
         if (faultAddr == addrNtCreateThread)
@@ -181,7 +181,7 @@ LONG WINAPI HardwareBreakpointHandler(PEXCEPTION_POINTERS ExceptionInfo)
                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                     (LPCSTR)returnsAddress, &hMods))
                 {
-                    TerminateProcess(GetCurrentProcess(), 0);
+                    set_score(&global_x, global_x.score + 20);
                 }
             }
         }
@@ -219,6 +219,15 @@ LONG WINAPI HardwareBreakpointHandler(PEXCEPTION_POINTERS ExceptionInfo)
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
+
+typedef BOOL(WINAPI* PReadProcessMemory)(
+      HANDLE  hProcess,
+      LPCVOID lpBaseAddress,
+      LPVOID  lpBuffer,
+      SIZE_T  nSize,
+      SIZE_T* lpNumberOfBytesRead
+);
+PReadProcessMemory OriginalReadProcessMemory = NULL;
 
 typedef PVOID(WINAPI* PAddVectoredExceptionHandler)(
     ULONG First,
@@ -294,14 +303,42 @@ void anti()
 //        WriteFile(hPipe, &event, sizeof(EDR_EVENT), &bytesWritten, NULL);
 //        CloseHandle(hPipe);
 //    }
+// 
 //}
+
+BOOL HookReadProcessMemory(HANDLE  hProcess, LPCVOID lpBaseAddress, LPVOID  lpBuffer, SIZE_T  nSize, SIZE_T* lpNumberOfBytesRead)
+{
+    const char* Error[] = {
+        "lsaac.exe",
+        "explorer.exe",
+        "svchost.exe"
+    };
+    if (hProcess != (HANDLE)-1 && hProcess != GetCurrentProcess())
+    {
+        set_score(&global_x, global_x.score + 15);
+
+        char processName[MAX_PATH];
+        GetProcessNameByHandle(hProcess, processName, MAX_PATH);
+
+        for (int i = 0; i < 3; i++)
+        {
+            if (_stricmp(processName, Error[i]) == 0)
+            {
+                set_score(&global_x, global_x.score + 50);
+                break;
+            }
+        }
+    }
+    return OriginalReadProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesRead);
+}
+
 NTSTATUS HookZwMapViewOfSection(HANDLE SectionHandle, HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, SIZE_T CommitSize, PLARGE_INTEGER SectionOffset, PSIZE_T ViewSize, ULONG InheritDisposition, ULONG AllocationType, ULONG Win32Protect)
 {
     if (ProcessHandle != (HANDLE)-1 && ProcessHandle != GetCurrentProcess())
     {
-        if (Win32Protect == PAGE_EXECUTE_READWRITE)
+        if (Win32Protect == PAGE_EXECUTE_READWRITE || Win32Protect == PAGE_READWRITE)
         {
-            set_score(&global_x, global_x.score + 50);
+            set_score(&global_x, global_x.score + 5);
         }
     }
 
@@ -330,9 +367,8 @@ NTSTATUS HookLdrUnloadDll(HMODULE hModule)
 ULONG HookRtlCaptureStackBackTrace(ULONG  FramesToSkip, ULONG  FramesToCapture, PVOID* BackTrace, PULONG BackTraceHash)
 {
     if (FramesToSkip >= 5 && FramesToSkip <= 15)
-    {
-        TerminateProcess(GetCurrentProcess(), 0);
-        return 0xC0000022;
+    {  
+        set_score(&global_x, global_x.score + 20);
     }
     return OriginalRtlCaptureStackBackTrace(FramesToSkip, FramesToCapture, BackTrace, BackTraceHash);
 }
@@ -341,8 +377,7 @@ NTSTATUS HookNtProtectVirtualMemory(_In_ HANDLE  ProcessHandle, _Inout_ PVOID* B
 {
     if (ProcessHandle != (HANDLE)-1 && GetProcessId(ProcessHandle) != GetCurrentProcessId())
     {
-        TerminateProcess(GetCurrentProcess(), 0);
-        return 0xC0000022; 
+        set_score(&global_x, global_x.score = 15);
     }
     if (NewProtection == PAGE_EXECUTE_READ || NewProtection == PAGE_EXECUTE_READWRITE)
     {
@@ -354,8 +389,7 @@ NTSTATUS HookNtProtectVirtualMemory(_In_ HANDLE  ProcessHandle, _Inout_ PVOID* B
                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                 (LPCSTR)returnAddress, &hMod))
             {
-                TerminateProcess(GetCurrentProcess(), 0);
-                return 0xC0000022;
+                set_score(&global_x, global_x.score + 20);
             }
         }
     }
@@ -370,7 +404,7 @@ NTSTATUS HookNtWriteVirtualMemory(IN HANDLE ProcessHandle, IN PVOID BaseAddress,
         DWORD targetPid = GetProcessId(ProcessHandle);
         if (targetPid != 0 && targetPid != GetCurrentProcessId())
         {
-            return 0xC0000022;
+            set_score(&global_x, global_x.score + 50);
         }
     }
     return OriginalNtWriteVirtualMemory(ProcessHandle, BaseAddress, Buffer, NumberOfBytesToWrite, NumberOfBytesWritten);
@@ -381,13 +415,11 @@ NTSTATUS HookPNtAllocateVirtualMemory(HANDLE ProcessHandle, PVOID* BaseAddress, 
 {
     if (ProcessHandle != (HANDLE)-1 && ProcessHandle != GetCurrentProcess())
     {
-        TerminateProcess(GetCurrentProcess(), 0);
-        return 0xC0000022;;
+        set_score(&global_x, global_x.score + 5);
     }
     if (Protect == PAGE_EXECUTE_READWRITE)
     {
-        TerminateProcess(GetCurrentProcess(), 0);
-        return 0xC0000022;;
+        set_score(&global_x, global_x.score + 5);
     }
     return OriginalNtAllocateVirtualMemory(ProcessHandle, BaseAddress, ZeroBits, RegionSIZE, AllocationType, Protect);
 }
@@ -396,7 +428,7 @@ NTSTATUS HookPNtAllocateVirtualMemory(HANDLE ProcessHandle, PVOID* BaseAddress, 
 LSTATUS WINAPI HookRegSetValueExA(HKEY hKey, LPCSTR lpValueName, DWORD Reserved, DWORD dwType, const BYTE* lpData, DWORD cbData) {
     if (hKey == HKEY_CURRENT_USER)
     {
-        TerminateProcess(GetCurrentProcess(), 0);
+        set_score(&global_x, global_x.score + 15);
     }
     return OriginalRegSetValueExA(hKey, lpValueName, Reserved, dwType, lpData, cbData);
 }
@@ -407,12 +439,11 @@ HINSTANCE WINAPI HookShellExecuteA(HWND hwnd, LPCSTR lpOperation, LPCSTR lpFile,
     {
         if (_stricmp(lpFile, "fodhelper.exe") == 0)
         {
-            set_score(&global_x, global_x.score + 100);
+            set_score(&global_x, global_x.score + 35);
         }
     }
     return OriginalPShellExecuteA(hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShowCmd);
 }
-
 
 LSTATUS WINAPI HookRegCreateKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD Reserved, LPSTR lpClass, DWORD dwOptions, REGSAM samDesired, const LPSECURITY_ATTRIBUTES lpSecurityAttributes, PHKEY phkResult, LPDWORD lpdwDisposition)
 {
@@ -420,9 +451,8 @@ LSTATUS WINAPI HookRegCreateKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD Reserved, L
     {
         if (_stricmp(lpSubKey, "Software\\Classes\\ms-settings\\shell\\open\\command") == 0)
         {
-            MessageBoxA(0, "Попытка перенастройки ms-command!", "EDR", 0);
-            TerminateProcess(GetCurrentProcess(), 0);
-            return ERROR_ACCESS_DENIED;
+            MessageBoxA(0, "ms-command!", "EDR", 0);
+            set_score(&global_x, global_x.score + 20);
         }
     }
         return OriginalRegCreateKeyExA(hKey, lpSubKey, Reserved, lpClass, dwOptions, samDesired, lpSecurityAttributes, phkResult, lpdwDisposition);
@@ -441,6 +471,7 @@ BOOL WINAPI HookGetThreadContext(HANDLE hThread, LPCONTEXT lpContext)
             lpContext->Dr1 = 0;
             lpContext->Dr2 = 0;
             lpContext->Dr3 = 0;
+            lpContext->Dr6 = 0;
             lpContext->Dr7 = 0;
         }
     }
@@ -450,16 +481,11 @@ BOOL WINAPI HookGetThreadContext(HANDLE hThread, LPCONTEXT lpContext)
 
 BOOL WINAPI HookSetThreadContext(HANDLE hThread, const CONTEXT *lpContext)
 {
-    if (lpContext == NULL)
-    {
-        return OriginalSetThreadContext(hThread, lpContext);
-    }
-
     if ((lpContext->ContextFlags & CONTEXT_DEBUG_REGISTERS) == CONTEXT_DEBUG_REGISTERS)
     {
         if (lpContext->Dr0 == 0 && lpContext->Dr1 == 0 && lpContext->Dr2 == 0)
         {
-            TerminateProcess(GetCurrentProcess(), 0);
+            set_score(&global_x, global_x.score = 50);
         }
     }
     return OriginalSetThreadContext(hThread, lpContext);
@@ -470,11 +496,22 @@ PVOID WINAPI HookAddVectoredExceptionHandler(ULONG First, PVECTORED_EXCEPTION_HA
 {
     if (First != 0)
     {
-        TerminateProcess(GetCurrentProcess(), 0);
+        set_score(&global_x, global_x.score = 25);
     }
     return OriginalAddVectoredExeceptionHandler(First, Handler);
 }
 
+void InstallIATHook()
+{
+    HMODULE hBase = GetModuleHandle(NULL);
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hBase;
+    PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((BYTE*)hBase + dosHeader->e_lfanew);
+
+    IMAGE_DATA_DIRECTORY importDir = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (importDir.VirtualAddress == 0) return;
+
+    PIMAGE_IMPORT_DESCRIPTOR importDesc = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)hBase + importDir.VirtualAddress);
+}
 
 void InstallIATHook() {
     OriginalNtAllocateVirtualMemory = (PNtAllocateVirtualMemory)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtAllocateVirtualMemory");
@@ -520,6 +557,7 @@ void InstallIATHook() {
     OriginalSetThreadContext = (PSetThreadContext)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadContext");
     OriginalGetThreadContext = (PGetThreadContext)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadContext");
     OriginalAddVectoredExeceptionHandler = (PAddVectoredExceptionHandler)GetProcAddress(GetModuleHandleA("kernel32.dll"), "AddVectoredExceptionHandler");
+    OriginalReadProcessMemory = (PReadProcessMemory)GetProcAddress(GetModuleHandleA("kernel32.dll"), "ReadProcessMemory");
 
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
     OriginalNtProtectVirtualMemory = (PNtProtectVirtualMemory)GetProcAddress(hNtdll, "NtProtectVirtualMemory");
@@ -586,7 +624,13 @@ void InstallIATHook() {
                     thunk->u1.Function = (DWORD_PTR)HookAddVectoredExceptionHandler;
                     VirtualProtect(&thunk->u1.Function, sizeof(PVOID), oldProtect, &oldProtect);
                 }
-                thunk++;
+                else if ((PVOID)thunk->u1.Function == (PVOID)OriginalReadProcessMemory) {
+                    DWORD oldProtect;
+                    VirtualProtect(&thunk->u1.Function, sizeof(PVOID), PAGE_READWRITE, &oldProtect);
+                    thunk->u1.Function = (DWORD_PTR)HookReadProcessMemory;
+                    VirtualProtect(&thunk->u1.Function, sizeof(PVOID), oldProtect, &oldProtect);
+                    thunk++;
+                }
             }
         }
         else if (_stricmp(dllName, "ntdll.dll") == 0) {
@@ -626,6 +670,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     }
     return TRUE;
 }
+
 
 
 
