@@ -10,7 +10,6 @@
 typedef struct {
     int score;
 } Corecial;
-
 static Corecial global_x = { 0 };
 
 void set_score(Corecial* x, int value)
@@ -219,16 +218,6 @@ LONG WINAPI HardwareBreakpointHandler(PEXCEPTION_POINTERS ExceptionInfo)
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
-
-typedef BOOL(WINAPI* PReadProcessMemory)(
-      HANDLE  hProcess,
-      LPCVOID lpBaseAddress,
-      LPVOID  lpBuffer,
-      SIZE_T  nSize,
-      SIZE_T* lpNumberOfBytesRead
-);
-PReadProcessMemory OriginalReadProcessMemory = NULL;
-
 typedef PVOID(WINAPI* PAddVectoredExceptionHandler)(
     ULONG First,
     PVECTORED_EXCEPTION_HANDLER Handler
@@ -259,19 +248,33 @@ PRegSetValueExA OriginalRegSetValueExA = NULL;
 
 void SetHardwareBreakpoint(PVOID address, int index)
 {
+    if (index < 0 || index > 3) return;
     CONTEXT ctx = { 0 };
     ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+
     HANDLE hThread = GetCurrentThread();
-    if (GetThreadContext(hThread, &ctx)) {
-        if (index == 0) ctx.Dr0 = (DWORD64)address;
-        else if (index == 1) ctx.Dr1 = (DWORD64)address;
-        else if (index == 3) ctx.Dr3 = (DWORD64)address;
+    HANDLE hThreadCopy;
 
-        ctx.Dr7 |= (1ULL << (index * 2));
-        ctx.Dr7 &= ~(0xFUI64 << (16 + (index * 4)));
-
-        if (!SetThreadContext(hThread, &ctx));
+    if (!DuplicateHandle(GetCurrentProcess(), hThread, GetCurrentProcess(), &hThreadCopy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        return;
     }
+
+    if (GetThreadContext(hThreadCopy, &ctx))
+    {
+        switch (index)
+        {
+        case 0: ctx.Dr0 = (DWORD64)address; break;
+        case 1: ctx.Dr1 = (DWORD64)address; break;
+        case 2: ctx.Dr2 = (DWORD64)address; break;
+        case 3: ctx.Dr3 = (DWORD64)address; break;
+        }
+        ctx.Dr7 |= (1ULL << (index * 2));
+        ctx.Dr7 &= ~(0xFULL << (16 + (index * 4)));
+
+        SetThreadContext(hThreadCopy, &ctx);
+    }
+    CloseHandle(hThreadCopy);
 }
 
 
@@ -305,32 +308,6 @@ void anti()
 //    }
 // 
 //}
-
-BOOL HookReadProcessMemory(HANDLE  hProcess, LPCVOID lpBaseAddress, LPVOID  lpBuffer, SIZE_T  nSize, SIZE_T* lpNumberOfBytesRead)
-{
-    const char* Error[] = {
-        "lsaac.exe",
-        "explorer.exe",
-        "svchost.exe"
-    };
-    if (hProcess != (HANDLE)-1 && hProcess != GetCurrentProcess())
-    {
-        set_score(&global_x, global_x.score + 15);
-
-        char processName[MAX_PATH];
-        GetProcessNameByHandle(hProcess, processName, MAX_PATH);
-
-        for (int i = 0; i < 3; i++)
-        {
-            if (_stricmp(processName, Error[i]) == 0)
-            {
-                set_score(&global_x, global_x.score + 50);
-                break;
-            }
-        }
-    }
-    return OriginalReadProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesRead);
-}
 
 NTSTATUS HookZwMapViewOfSection(HANDLE SectionHandle, HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, SIZE_T CommitSize, PLARGE_INTEGER SectionOffset, PSIZE_T ViewSize, ULONG InheritDisposition, ULONG AllocationType, ULONG Win32Protect)
 {
@@ -377,7 +354,7 @@ NTSTATUS HookNtProtectVirtualMemory(_In_ HANDLE  ProcessHandle, _Inout_ PVOID* B
 {
     if (ProcessHandle != (HANDLE)-1 && GetProcessId(ProcessHandle) != GetCurrentProcessId())
     {
-        set_score(&global_x, global_x.score = 15);
+        set_score(&global_x, global_x.score + 15);
     }
     if (NewProtection == PAGE_EXECUTE_READ || NewProtection == PAGE_EXECUTE_READWRITE)
     {
@@ -496,7 +473,7 @@ PVOID WINAPI HookAddVectoredExceptionHandler(ULONG First, PVECTORED_EXCEPTION_HA
 {
     if (First != 0)
     {
-        set_score(&global_x, global_x.score = 25);
+        set_score(&global_x, global_x.score + 25);
     }
     return OriginalAddVectoredExeceptionHandler(First, Handler);
 }
@@ -545,7 +522,6 @@ void InstallIATHook() {
     OriginalSetThreadContext = (PSetThreadContext)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadContext");
     OriginalGetThreadContext = (PGetThreadContext)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadContext");
     OriginalAddVectoredExeceptionHandler = (PAddVectoredExceptionHandler)GetProcAddress(GetModuleHandleA("kernel32.dll"), "AddVectoredExceptionHandler");
-    OriginalReadProcessMemory = (PReadProcessMemory)GetProcAddress(GetModuleHandleA("kernel32.dll"), "ReadProcessMemory");
 
     HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
     OriginalNtProtectVirtualMemory = (PNtProtectVirtualMemory)GetProcAddress(hNtdll, "NtProtectVirtualMemory");
@@ -612,13 +588,6 @@ void InstallIATHook() {
                     thunk->u1.Function = (DWORD_PTR)HookAddVectoredExceptionHandler;
                     VirtualProtect(&thunk->u1.Function, sizeof(PVOID), oldProtect, &oldProtect);
                 }
-                else if ((PVOID)thunk->u1.Function == (PVOID)OriginalReadProcessMemory) {
-                    DWORD oldProtect;
-                    VirtualProtect(&thunk->u1.Function, sizeof(PVOID), PAGE_READWRITE, &oldProtect);
-                    thunk->u1.Function = (DWORD_PTR)HookReadProcessMemory;
-                    VirtualProtect(&thunk->u1.Function, sizeof(PVOID), oldProtect, &oldProtect);
-                    thunk++;
-                }
             }
         }
         else if (_stricmp(dllName, "ntdll.dll") == 0) {
@@ -658,8 +627,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     }
     return TRUE;
 }
-
-
 
 
 
