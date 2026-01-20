@@ -501,18 +501,6 @@ PVOID WINAPI HookAddVectoredExceptionHandler(ULONG First, PVECTORED_EXCEPTION_HA
     return OriginalAddVectoredExeceptionHandler(First, Handler);
 }
 
-void InstallIATHook()
-{
-    HMODULE hBase = GetModuleHandle(NULL);
-    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hBase;
-    PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((BYTE*)hBase + dosHeader->e_lfanew);
-
-    IMAGE_DATA_DIRECTORY importDir = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (importDir.VirtualAddress == 0) return;
-
-    PIMAGE_IMPORT_DESCRIPTOR importDesc = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)hBase + importDir.VirtualAddress);
-}
-
 void InstallIATHook() {
     OriginalNtAllocateVirtualMemory = (PNtAllocateVirtualMemory)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtAllocateVirtualMemory");
 
@@ -670,7 +658,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     }
     return TRUE;
 }
-
 
 
 
