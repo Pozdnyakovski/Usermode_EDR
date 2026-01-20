@@ -485,7 +485,7 @@ BOOL WINAPI HookSetThreadContext(HANDLE hThread, const CONTEXT *lpContext)
     {
         if (lpContext->Dr0 == 0 && lpContext->Dr1 == 0 && lpContext->Dr2 == 0)
         {
-            set_score(&global_x, global_x.score = 50);
+            set_score(&global_x, global_x.score + 50);
         }
     }
     return OriginalSetThreadContext(hThread, lpContext);
@@ -670,12 +670,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     }
     return TRUE;
 }
-
-
-
-
-
-
 
 
 
